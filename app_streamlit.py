@@ -3,7 +3,6 @@ from __future__ import annotations
 import importlib.util
 import hashlib
 import io
-import json
 import os
 import re
 import socket
@@ -40,13 +39,6 @@ def load_opendataloader_pdf():
     except Exception as exc:  # noqa: BLE001
         return None, exc
     return module, None
-
-
-@st.cache_resource(show_spinner=False)
-def get_easyocr_reader(lang_tuple: tuple[str, ...]):
-    import easyocr
-
-    return easyocr.Reader(list(lang_tuple), gpu=False, verbose=False)
 
 
 def get_run_root() -> Path:
@@ -171,56 +163,6 @@ def merge_chunk_markdown_files(output_dir: Path) -> list[Path]:
                 out_f.write(text)
         merged_files.append(merged_path)
     return merged_files
-
-
-def easyocr_extract_text_by_page(pdf_path: Path, ocr_lang: str) -> list[str]:
-    import numpy as np
-    import pypdfium2 as pdfium
-
-    langs = tuple(sorted({x.strip() for x in ocr_lang.split(",") if x.strip()})) or ("en",)
-    reader = get_easyocr_reader(langs)
-
-    doc = pdfium.PdfDocument(str(pdf_path))
-    page_texts: list[str] = []
-    for idx in range(len(doc)):
-        page = doc.get_page(idx)
-        bitmap = page.render(scale=2.0)
-        pil_img = bitmap.to_pil()
-        result = reader.readtext(np.array(pil_img), detail=0, paragraph=True)
-        lines = [x.strip() for x in result if str(x).strip()]
-        page_texts.append("\n".join(lines).strip())
-        page.close()
-    doc.close()
-    return page_texts
-
-
-def write_easyocr_fallback_output(
-    chunk_pdf_path: Path,
-    output_dir: Path,
-    selected_formats: list[str],
-    ocr_lang: str,
-) -> None:
-    page_texts = easyocr_extract_text_by_page(chunk_pdf_path, ocr_lang)
-    stem = chunk_pdf_path.stem
-
-    if "markdown" in selected_formats:
-        parts: list[str] = []
-        for i, text in enumerate(page_texts, start=1):
-            if i > 1:
-                parts.append("\n\n<!-- page chunk -->\n\n")
-            parts.append(text if text else f"(No OCR text detected on page {i})")
-        (output_dir / f"{stem}.md").write_text("".join(parts), encoding="utf-8")
-
-    if "json" in selected_formats:
-        payload = {
-            "source": chunk_pdf_path.name,
-            "engine": "easyocr-fallback",
-            "pages": [{"page": i, "text": text} for i, text in enumerate(page_texts, start=1)],
-        }
-        (output_dir / f"{stem}.json").write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
 
 
 def _find_java_exe() -> Path | None:
@@ -518,38 +460,20 @@ def main() -> None:
                             )
                         except Exception as chunk_exc:  # noqa: BLE001
                             ocr_failures += 1
-                            st.warning(
-                                f"OCR failed on chunk {idx}/{total}. "
-                                "Trying EasyOCR fallback for this chunk."
-                            )
+                            st.warning(f"OCR failed on chunk {idx}/{total}.")
                             try:
-                                write_easyocr_fallback_output(
-                                    chunk_pdf_path=Path(one_input),
-                                    output_dir=output_dir,
-                                    selected_formats=selected_formats,
-                                    ocr_lang=ocr_lang,
+                                opendataloader_pdf.convert(
+                                    input_path=[one_input],
+                                    output_dir=str(output_dir),
+                                    format=format_arg,
                                 )
-                            except Exception as easyocr_exc:  # noqa: BLE001
-                                st.warning(
-                                    "EasyOCR fallback failed for this chunk. "
-                                    "Trying standard extraction."
+                            except Exception as fallback_exc:  # noqa: BLE001
+                                hard_failures += 1
+                                st.error(
+                                    f"Chunk {idx}/{total} failed in both hybrid and standard modes.\n"
+                                    f"Hybrid OCR error: {chunk_exc}\n"
+                                    f"Standard fallback error: {fallback_exc}"
                                 )
-                                try:
-                                    opendataloader_pdf.convert(
-                                        input_path=[one_input],
-                                        output_dir=str(output_dir),
-                                        format=format_arg,
-                                    )
-                                except Exception as fallback_exc:  # noqa: BLE001
-                                    hard_failures += 1
-                                    st.error(
-                                        f"Chunk {idx}/{total} failed in all modes.\n"
-                                        f"OCR error: {chunk_exc}\n"
-                                        f"EasyOCR error: {easyocr_exc}\n"
-                                        f"Standard fallback error: {fallback_exc}"
-                                    )
-                            else:
-                                st.info(f"EasyOCR fallback succeeded on chunk {idx}/{total}.")
                         progress.progress(
                             idx / total,
                             text=f"OCR conversion in progress... ({idx}/{total})",

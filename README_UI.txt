@@ -7,9 +7,8 @@ run_ui.bat
 Or run:
 python -m streamlit run app_streamlit.py --server.address 0.0.0.0 --server.port 8501
 
-## Public URL (streamlit.app style)
-See:
-DEPLOY_STREAMLIT_CLOUD.md
+## Operation mode
+This setup is for local hosting (no streamlit.app).
 
 ## How to use
 1. Upload one or more PDF files.

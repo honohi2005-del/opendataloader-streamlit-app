@@ -37,6 +37,7 @@ except Exception as exc:  # noqa: BLE001
 APP_DIR = Path(__file__).resolve().parent
 HYBRID_PORT = 5012
 HYBRID_STARTUP_TIMEOUT_SEC = int(os.getenv("HYBRID_STARTUP_TIMEOUT_SEC", "240"))
+HYBRID_STARTUP_WAIT_INTERVAL_SEC = 0.25
 
 
 def get_run_root() -> Path:
@@ -58,6 +59,16 @@ def build_zip_bytes(folder: Path) -> bytes:
                 zf.write(path, arcname=path.relative_to(folder))
     memory_file.seek(0)
     return memory_file.read()
+
+
+def read_file_tail(path: Path, max_chars: int = 4000) -> str:
+    try:
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        if len(text) <= max_chars:
+            return text
+        return text[-max_chars:]
+    except OSError:
+        return ""
 
 
 CHUNK_MD_RE = re.compile(r"^(?P<base>.+)__p(?P<start>\d+)-(?P<end>\d+)\.md$")
@@ -210,12 +221,14 @@ def ensure_hybrid_server(
 ) -> tuple[bool, str]:
     desired_cfg = (port, force_ocr, ocr_lang)
     prev_cfg = st.session_state.get("hybrid_server_cfg")
-    prev_pid = st.session_state.get("hybrid_server_pid")
-    if prev_cfg != desired_cfg and prev_pid:
+    if prev_cfg != desired_cfg:
         stop_hybrid_server()
 
-    if is_hybrid_ready(port):
+    existing_proc = st.session_state.get("hybrid_server_proc")
+    if existing_proc is not None and existing_proc.poll() is None and is_hybrid_ready(port):
         return True, f"Hybrid server is ready on port {port}."
+    if is_hybrid_ready(port):
+        return True, f"Hybrid server is already running on port {port}."
 
     hybrid_cmd = shutil.which("opendataloader-pdf-hybrid")
     if hybrid_cmd:
@@ -228,14 +241,22 @@ def ensure_hybrid_server(
         cmd.extend(["--ocr-lang", ocr_lang.strip()])
 
     creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    log_dir = Path(tempfile.gettempdir()) / "opendataloader_hybrid_logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    log_path = log_dir / f"hybrid_{ts}_{port}.log"
+    log_fh = log_path.open("ab")
+
     proc = subprocess.Popen(  # noqa: S603
         cmd,
         cwd=str(APP_DIR),
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stdout=log_fh,
+        stderr=subprocess.STDOUT,
         creationflags=creation_flags,
     )
-    st.session_state["hybrid_server_pid"] = proc.pid
+    st.session_state["hybrid_server_proc"] = proc
+    st.session_state["hybrid_server_log_path"] = str(log_path)
+    st.session_state["hybrid_server_log_fh"] = log_fh
     st.session_state["hybrid_server_cfg"] = desired_cfg
 
     deadline = time.monotonic() + HYBRID_STARTUP_TIMEOUT_SEC
@@ -243,25 +264,45 @@ def ensure_hybrid_server(
         if is_hybrid_ready(port):
             return True, f"Hybrid server started on port {port}."
         if proc.poll() is not None:
-            return False, "Could not start hybrid server. Check OCR dependencies."
-        time.sleep(0.25)
+            log_tail = read_file_tail(log_path).strip()
+            detail = (
+                f"Could not start hybrid server. See log: {log_path}"
+                if not log_tail
+                else f"Could not start hybrid server. Log tail:\n{log_tail}"
+            )
+            return False, detail
+        time.sleep(HYBRID_STARTUP_WAIT_INTERVAL_SEC)
 
     return (
         False,
         f"Hybrid server startup timed out ({HYBRID_STARTUP_TIMEOUT_SEC}s). "
-        "Try again after 1-2 minutes, or reduce page range.",
+        f"Try again after 1-2 minutes, or reduce page range. Log: {log_path}",
     )
 
 
 def stop_hybrid_server() -> None:
-    pid = st.session_state.get("hybrid_server_pid")
-    if not pid:
-        return
+    proc = st.session_state.get("hybrid_server_proc")
     try:
-        os.kill(pid, 9)
+        if proc is not None and proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=5)
     except OSError:
         pass
-    st.session_state.pop("hybrid_server_pid", None)
+    finally:
+        log_fh = st.session_state.get("hybrid_server_log_fh")
+        if log_fh is not None:
+            try:
+                log_fh.close()
+            except OSError:
+                pass
+    st.session_state.pop("hybrid_server_proc", None)
+    st.session_state.pop("hybrid_server_log_path", None)
+    st.session_state.pop("hybrid_server_log_fh", None)
+    st.session_state.pop("hybrid_server_cfg", None)
 
 
 def main() -> None:
@@ -390,16 +431,15 @@ def main() -> None:
                     progress = st.progress(0.0, text="OCR conversion in progress...")
                     total = len(conversion_input_paths)
                     ocr_failures = 0
+                    started, msg = ensure_hybrid_server(
+                        port=HYBRID_PORT,
+                        force_ocr=force_ocr_all_pages,
+                        ocr_lang=ocr_lang,
+                    )
+                    if not started:
+                        st.error(msg)
+                        return
                     for idx, one_input in enumerate(conversion_input_paths, start=1):
-                        stop_hybrid_server()
-                        started, msg = ensure_hybrid_server(
-                            port=HYBRID_PORT,
-                            force_ocr=force_ocr_all_pages,
-                            ocr_lang=ocr_lang,
-                        )
-                        if not started:
-                            st.error(msg)
-                            return
                         convert_kwargs = {
                             "hybrid": "docling-fast",
                             "hybrid_mode": "full" if force_ocr_all_pages else "auto",

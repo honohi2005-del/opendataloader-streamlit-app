@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import io
 import os
 import re
@@ -11,6 +12,7 @@ import sys
 import tempfile
 import time
 import traceback
+import unicodedata
 import zipfile
 from pathlib import Path
 from urllib import error, request
@@ -61,6 +63,16 @@ def build_zip_bytes(folder: Path) -> bytes:
 CHUNK_MD_RE = re.compile(r"^(?P<base>.+)__p(?P<start>\d+)-(?P<end>\d+)\.md$")
 
 
+def make_safe_stem(name: str) -> str:
+    normalized = unicodedata.normalize("NFKD", name)
+    ascii_name = normalized.encode("ascii", "ignore").decode("ascii")
+    ascii_name = re.sub(r"[^A-Za-z0-9._-]+", "_", ascii_name).strip("._-")
+    if not ascii_name:
+        ascii_name = "file"
+    digest = hashlib.sha1(name.encode("utf-8")).hexdigest()[:8]
+    return f"{ascii_name}_{digest}"
+
+
 def parse_pages_spec(spec: str, total_pages: int) -> list[int]:
     if not spec.strip():
         return list(range(1, total_pages + 1))
@@ -101,13 +113,14 @@ def split_pdf_for_ocr(
 
     out_dir.mkdir(parents=True, exist_ok=True)
     chunks: list[Path] = []
+    safe_base = make_safe_stem(src_pdf.stem)
     for i in range(0, len(selected_pages), chunk_size):
         chunk = selected_pages[i : i + chunk_size]
         writer = PdfWriter()
         for page_num in chunk:
             writer.add_page(reader.pages[page_num - 1])
         start, end = chunk[0], chunk[-1]
-        chunk_path = out_dir / f"{src_pdf.stem}__p{start:04d}-{end:04d}.pdf"
+        chunk_path = out_dir / f"{safe_base}__p{start:04d}-{end:04d}.pdf"
         with chunk_path.open("wb") as f:
             writer.write(f)
         chunks.append(chunk_path)
@@ -330,7 +343,9 @@ def main() -> None:
 
         input_paths: list[str] = []
         for i, file in enumerate(uploaded_files):
-            safe_name = Path(file.name).name
+            original_name = Path(file.name).name
+            suffix = Path(original_name).suffix.lower() or ".pdf"
+            safe_name = make_safe_stem(Path(original_name).stem) + suffix
             target = input_dir / safe_name
             if target.exists():
                 target = input_dir / f"{i + 1}_{safe_name}"
@@ -374,6 +389,7 @@ def main() -> None:
                 if use_ocr:
                     progress = st.progress(0.0, text="OCR conversion in progress...")
                     total = len(conversion_input_paths)
+                    ocr_failures = 0
                     for idx, one_input in enumerate(conversion_input_paths, start=1):
                         stop_hybrid_server()
                         started, msg = ensure_hybrid_server(
@@ -391,17 +407,34 @@ def main() -> None:
                             "hybrid_timeout": "240000",
                             "hybrid_fallback": allow_java_fallback,
                         }
-                        opendataloader_pdf.convert(
-                            input_path=[one_input],
-                            output_dir=str(output_dir),
-                            format=format_arg,
-                            **convert_kwargs,
-                        )
+                        try:
+                            opendataloader_pdf.convert(
+                                input_path=[one_input],
+                                output_dir=str(output_dir),
+                                format=format_arg,
+                                **convert_kwargs,
+                            )
+                        except Exception as chunk_exc:  # noqa: BLE001
+                            ocr_failures += 1
+                            st.warning(
+                                f"OCR failed on chunk {idx}/{total}. "
+                                "Falling back to standard extraction for this chunk."
+                            )
+                            opendataloader_pdf.convert(
+                                input_path=[one_input],
+                                output_dir=str(output_dir),
+                                format=format_arg,
+                            )
                         progress.progress(
                             idx / total,
                             text=f"OCR conversion in progress... ({idx}/{total})",
                         )
                     stop_hybrid_server()
+                    if ocr_failures:
+                        st.warning(
+                            f"OCR backend failed on {ocr_failures} chunk(s). "
+                            "Fallback output was generated for those chunks."
+                        )
                 else:
                     convert_kwargs = {}
                     if page_selection.strip():

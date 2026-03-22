@@ -1,0 +1,22 @@
+Hybrid mode example (for scanned PDFs, OCR, complex tables, formulas, charts)
+
+Install:
+pip install -U "opendataloader-pdf[hybrid]"
+
+Terminal 1:
+opendataloader-pdf-hybrid --port 5002
+
+Terminal 2:
+opendataloader-pdf --hybrid docling-fast sample.pdf
+
+Or in Python:
+import opendataloader_pdf
+
+opendataloader_pdf.convert(
+    input_path=["sample.pdf"],
+    output_dir="output",
+    hybrid="docling-fast"
+)
+
+For Japanese scanned PDFs, the official README says OCR languages can be set with:
+--force-ocr --ocr-lang "ja,en"

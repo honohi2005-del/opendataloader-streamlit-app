@@ -22,6 +22,7 @@ APP_DIR = Path(__file__).resolve().parent
 RUN_ROOT = APP_DIR / "ui_runs"
 RUN_ROOT.mkdir(exist_ok=True)
 HYBRID_PORT = 5012
+HYBRID_STARTUP_TIMEOUT_SEC = int(os.getenv("HYBRID_STARTUP_TIMEOUT_SEC", "240"))
 
 
 def build_zip_bytes(folder: Path) -> bytes:
@@ -203,14 +204,19 @@ def ensure_hybrid_server(
     st.session_state["hybrid_server_pid"] = proc.pid
     st.session_state["hybrid_server_cfg"] = desired_cfg
 
-    for _ in range(120):
+    deadline = time.monotonic() + HYBRID_STARTUP_TIMEOUT_SEC
+    while time.monotonic() < deadline:
         if is_hybrid_ready(port):
             return True, f"Hybrid server started on port {port}."
         if proc.poll() is not None:
             return False, "Could not start hybrid server. Check OCR dependencies."
         time.sleep(0.25)
 
-    return False, "Hybrid server startup timed out."
+    return (
+        False,
+        f"Hybrid server startup timed out ({HYBRID_STARTUP_TIMEOUT_SEC}s). "
+        "Try again after 1-2 minutes, or reduce page range.",
+    )
 
 
 def main() -> None:
@@ -316,6 +322,10 @@ def main() -> None:
         try:
             with st.spinner("Converting..."):
                 if use_ocr:
+                    st.info(
+                        "Starting OCR backend. First run can take a few minutes "
+                        "(model download + warm-up)."
+                    )
                     started, msg = ensure_hybrid_server(
                         port=HYBRID_PORT,
                         force_ocr=force_ocr_all_pages,

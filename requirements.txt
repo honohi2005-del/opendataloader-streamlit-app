@@ -1,3 +1,6 @@
 streamlit==1.55.0
 opendataloader-pdf[hybrid]==2.0.2
+fastapi>=0.135,<1.0
+uvicorn>=0.42,<1.0
+docling>=2.81,<3.0
 pypdf==6.9.1

@@ -174,11 +174,7 @@ def ensure_hybrid_server(
     prev_cfg = st.session_state.get("hybrid_server_cfg")
     prev_pid = st.session_state.get("hybrid_server_pid")
     if prev_cfg != desired_cfg and prev_pid:
-        try:
-            os.kill(prev_pid, 9)
-        except OSError:
-            pass
-        st.session_state.pop("hybrid_server_pid", None)
+        stop_hybrid_server()
 
     if is_hybrid_ready(port):
         return True, f"Hybrid server is ready on port {port}."
@@ -219,6 +215,17 @@ def ensure_hybrid_server(
     )
 
 
+def stop_hybrid_server() -> None:
+    pid = st.session_state.get("hybrid_server_pid")
+    if not pid:
+        return
+    try:
+        os.kill(pid, 9)
+    except OSError:
+        pass
+    st.session_state.pop("hybrid_server_pid", None)
+
+
 def main() -> None:
     st.set_page_config(page_title="OpenDataLoader UI", layout="centered")
     st.title("OpenDataLoader PDF Converter")
@@ -249,6 +256,7 @@ def main() -> None:
     ocr_lang = "ja,en"
     force_ocr_all_pages = True
     ocr_chunk_size = 1
+    allow_java_fallback = False
 
     if use_ocr:
         force_ocr_all_pages = st.checkbox("Force OCR on all pages", value=True)
@@ -261,6 +269,10 @@ def main() -> None:
                 value=1,
                 step=1,
             )
+        )
+        allow_java_fallback = st.checkbox(
+            "Allow Java fallback if OCR fails (may create image-only markdown)",
+            value=False,
         )
         missing = missing_hybrid_modules()
         if missing:
@@ -326,31 +338,49 @@ def main() -> None:
                         "Starting OCR backend. First run can take a few minutes "
                         "(model download + warm-up)."
                     )
-                    started, msg = ensure_hybrid_server(
-                        port=HYBRID_PORT,
-                        force_ocr=force_ocr_all_pages,
-                        ocr_lang=ocr_lang,
-                    )
-                    if not started:
-                        st.error(msg)
-                        return
-                    st.info(msg)
-                convert_kwargs = {}
-                if page_selection.strip() and not use_ocr:
-                    convert_kwargs["pages"] = page_selection.strip()
                 if use_ocr:
-                    convert_kwargs["hybrid"] = "docling-fast"
-                    convert_kwargs["hybrid_mode"] = "full" if force_ocr_all_pages else "auto"
-                    convert_kwargs["hybrid_url"] = f"http://127.0.0.1:{HYBRID_PORT}"
-                    convert_kwargs["hybrid_timeout"] = "180000"
-                    convert_kwargs["hybrid_fallback"] = True
-                opendataloader_pdf.convert(
-                    input_path=conversion_input_paths,
-                    output_dir=str(output_dir),
-                    format=format_arg,
-                    **convert_kwargs,
-                )
+                    progress = st.progress(0.0, text="OCR conversion in progress...")
+                    total = len(conversion_input_paths)
+                    for idx, one_input in enumerate(conversion_input_paths, start=1):
+                        stop_hybrid_server()
+                        started, msg = ensure_hybrid_server(
+                            port=HYBRID_PORT,
+                            force_ocr=force_ocr_all_pages,
+                            ocr_lang=ocr_lang,
+                        )
+                        if not started:
+                            st.error(msg)
+                            return
+                        convert_kwargs = {
+                            "hybrid": "docling-fast",
+                            "hybrid_mode": "full" if force_ocr_all_pages else "auto",
+                            "hybrid_url": f"http://127.0.0.1:{HYBRID_PORT}",
+                            "hybrid_timeout": "240000",
+                            "hybrid_fallback": allow_java_fallback,
+                        }
+                        opendataloader_pdf.convert(
+                            input_path=[one_input],
+                            output_dir=str(output_dir),
+                            format=format_arg,
+                            **convert_kwargs,
+                        )
+                        progress.progress(
+                            idx / total,
+                            text=f"OCR conversion in progress... ({idx}/{total})",
+                        )
+                    stop_hybrid_server()
+                else:
+                    convert_kwargs = {}
+                    if page_selection.strip():
+                        convert_kwargs["pages"] = page_selection.strip()
+                    opendataloader_pdf.convert(
+                        input_path=conversion_input_paths,
+                        output_dir=str(output_dir),
+                        format=format_arg,
+                        **convert_kwargs,
+                    )
         except Exception as exc:  # noqa: BLE001
+            stop_hybrid_server()
             st.exception(exc)
             return
 

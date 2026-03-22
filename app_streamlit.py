@@ -19,13 +19,6 @@ from urllib import error, request
 
 import streamlit as st
 try:
-    import opendataloader_pdf
-    OPENDATALOADER_IMPORT_ERROR: Exception | None = None
-except Exception as exc:  # noqa: BLE001
-    opendataloader_pdf = None  # type: ignore[assignment]
-    OPENDATALOADER_IMPORT_ERROR = exc
-
-try:
     from pypdf import PdfReader, PdfWriter
     PYPDF_IMPORT_ERROR: Exception | None = None
 except Exception as exc:  # noqa: BLE001
@@ -38,6 +31,14 @@ APP_DIR = Path(__file__).resolve().parent
 HYBRID_PORT = 5012
 HYBRID_STARTUP_TIMEOUT_SEC = int(os.getenv("HYBRID_STARTUP_TIMEOUT_SEC", "240"))
 HYBRID_STARTUP_WAIT_INTERVAL_SEC = 0.25
+
+
+def load_opendataloader_pdf():
+    try:
+        import opendataloader_pdf as module  # type: ignore[import-not-found]
+    except Exception as exc:  # noqa: BLE001
+        return None, exc
+    return module, None
 
 
 def get_run_root() -> Path:
@@ -311,9 +312,6 @@ def main() -> None:
     st.write("Upload PDF files and convert to Markdown/JSON.")
     run_root = get_run_root()
 
-    if OPENDATALOADER_IMPORT_ERROR is not None:
-        st.error(f"Failed to import opendataloader_pdf: {OPENDATALOADER_IMPORT_ERROR}")
-        st.stop()
     if PYPDF_IMPORT_ERROR is not None:
         st.error(f"Failed to import pypdf: {PYPDF_IMPORT_ERROR}")
         st.stop()
@@ -343,7 +341,7 @@ def main() -> None:
     ocr_lang = "ja,en"
     force_ocr_all_pages = True
     ocr_chunk_size = 1
-    allow_java_fallback = False
+    allow_java_fallback = True
 
     if use_ocr:
         force_ocr_all_pages = st.checkbox("Force OCR on all pages", value=True)
@@ -358,8 +356,8 @@ def main() -> None:
             )
         )
         allow_java_fallback = st.checkbox(
-            "Allow Java fallback if OCR fails (may create image-only markdown)",
-            value=False,
+            "Use Java fallback if OCR backend fails (recommended)",
+            value=True,
         )
         missing = missing_hybrid_modules()
         if missing:
@@ -374,6 +372,11 @@ def main() -> None:
 
     can_run = bool(uploaded_files) and bool(selected_formats)
     if st.button("Run conversion", disabled=not can_run):
+        opendataloader_pdf, opendataloader_import_error = load_opendataloader_pdf()
+        if opendataloader_import_error is not None or opendataloader_pdf is None:
+            st.error(f"Failed to import opendataloader_pdf: {opendataloader_import_error}")
+            return
+
         run_id = time.strftime("%Y%m%d_%H%M%S")
         run_dir = run_root / f"run_{run_id}"
         input_dir = run_dir / "input"
@@ -431,6 +434,7 @@ def main() -> None:
                     progress = st.progress(0.0, text="OCR conversion in progress...")
                     total = len(conversion_input_paths)
                     ocr_failures = 0
+                    hard_failures = 0
                     started, msg = ensure_hybrid_server(
                         port=HYBRID_PORT,
                         force_ocr=force_ocr_all_pages,
@@ -460,11 +464,19 @@ def main() -> None:
                                 f"OCR failed on chunk {idx}/{total}. "
                                 "Falling back to standard extraction for this chunk."
                             )
-                            opendataloader_pdf.convert(
-                                input_path=[one_input],
-                                output_dir=str(output_dir),
-                                format=format_arg,
-                            )
+                            try:
+                                opendataloader_pdf.convert(
+                                    input_path=[one_input],
+                                    output_dir=str(output_dir),
+                                    format=format_arg,
+                                )
+                            except Exception as fallback_exc:  # noqa: BLE001
+                                hard_failures += 1
+                                st.error(
+                                    f"Chunk {idx}/{total} failed in both OCR and fallback modes.\n"
+                                    f"OCR error: {chunk_exc}\n"
+                                    f"Fallback error: {fallback_exc}"
+                                )
                         progress.progress(
                             idx / total,
                             text=f"OCR conversion in progress... ({idx}/{total})",
@@ -474,6 +486,11 @@ def main() -> None:
                         st.warning(
                             f"OCR backend failed on {ocr_failures} chunk(s). "
                             "Fallback output was generated for those chunks."
+                        )
+                    if hard_failures:
+                        st.warning(
+                            f"{hard_failures} chunk(s) could not be converted. "
+                            "Try smaller page ranges or fewer OCR languages."
                         )
                 else:
                     convert_kwargs = {}

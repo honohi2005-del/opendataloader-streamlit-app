@@ -9,13 +9,26 @@ import subprocess
 import shutil
 import sys
 import time
+import traceback
 import zipfile
 from pathlib import Path
 from urllib import error, request
 
-import opendataloader_pdf
 import streamlit as st
-from pypdf import PdfReader, PdfWriter
+try:
+    import opendataloader_pdf
+    OPENDATALOADER_IMPORT_ERROR: Exception | None = None
+except Exception as exc:  # noqa: BLE001
+    opendataloader_pdf = None  # type: ignore[assignment]
+    OPENDATALOADER_IMPORT_ERROR = exc
+
+try:
+    from pypdf import PdfReader, PdfWriter
+    PYPDF_IMPORT_ERROR: Exception | None = None
+except Exception as exc:  # noqa: BLE001
+    PdfReader = None  # type: ignore[assignment]
+    PdfWriter = None  # type: ignore[assignment]
+    PYPDF_IMPORT_ERROR = exc
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -69,6 +82,8 @@ def split_pdf_for_ocr(
     page_spec: str,
     chunk_size: int,
 ) -> list[Path]:
+    if PdfReader is None or PdfWriter is None:
+        raise RuntimeError(f"pypdf import failed: {PYPDF_IMPORT_ERROR}")
     reader = PdfReader(str(src_pdf))
     selected_pages = parse_pages_spec(page_spec, len(reader.pages))
     if not selected_pages:
@@ -230,6 +245,13 @@ def main() -> None:
     st.set_page_config(page_title="OpenDataLoader UI", layout="centered")
     st.title("OpenDataLoader PDF Converter")
     st.write("Upload PDF files and convert to Markdown/JSON.")
+
+    if OPENDATALOADER_IMPORT_ERROR is not None:
+        st.error(f"Failed to import opendataloader_pdf: {OPENDATALOADER_IMPORT_ERROR}")
+        st.stop()
+    if PYPDF_IMPORT_ERROR is not None:
+        st.error(f"Failed to import pypdf: {PYPDF_IMPORT_ERROR}")
+        st.stop()
 
     ok, java_message = ensure_java_on_path()
     if ok:
@@ -408,4 +430,8 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:  # noqa: BLE001
+        st.error("Unexpected app error during startup.")
+        st.code(traceback.format_exc())

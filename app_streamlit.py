@@ -8,6 +8,7 @@ import socket
 import subprocess
 import shutil
 import sys
+import tempfile
 import time
 import traceback
 import zipfile
@@ -32,10 +33,19 @@ except Exception as exc:  # noqa: BLE001
 
 
 APP_DIR = Path(__file__).resolve().parent
-RUN_ROOT = APP_DIR / "ui_runs"
-RUN_ROOT.mkdir(exist_ok=True)
 HYBRID_PORT = 5012
 HYBRID_STARTUP_TIMEOUT_SEC = int(os.getenv("HYBRID_STARTUP_TIMEOUT_SEC", "240"))
+
+
+def get_run_root() -> Path:
+    preferred = APP_DIR / "ui_runs"
+    try:
+        preferred.mkdir(parents=True, exist_ok=True)
+        return preferred
+    except OSError:
+        fallback = Path(tempfile.gettempdir()) / "opendataloader_ui_runs"
+        fallback.mkdir(parents=True, exist_ok=True)
+        return fallback
 
 
 def build_zip_bytes(folder: Path) -> bytes:
@@ -245,6 +255,7 @@ def main() -> None:
     st.set_page_config(page_title="OpenDataLoader UI", layout="centered")
     st.title("OpenDataLoader PDF Converter")
     st.write("Upload PDF files and convert to Markdown/JSON.")
+    run_root = get_run_root()
 
     if OPENDATALOADER_IMPORT_ERROR is not None:
         st.error(f"Failed to import opendataloader_pdf: {OPENDATALOADER_IMPORT_ERROR}")
@@ -310,7 +321,7 @@ def main() -> None:
     can_run = bool(uploaded_files) and bool(selected_formats)
     if st.button("Run conversion", disabled=not can_run):
         run_id = time.strftime("%Y%m%d_%H%M%S")
-        run_dir = RUN_ROOT / f"run_{run_id}"
+        run_dir = run_root / f"run_{run_id}"
         input_dir = run_dir / "input"
         ocr_split_dir = run_dir / "ocr_split"
         output_dir = run_dir / "output"
